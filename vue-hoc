@@ -1,0 +1,335 @@
+import Vue from 'vue';
+
+var normalizeSlots = function normalizeSlots(slots, context) {
+  return Object.keys(slots).reduce(function (arr, key) {
+    slots[key].forEach(function (vnode) {
+      if (!vnode.context) {
+        slots[key].context = context;
+        if (!vnode.data) {
+          vnode.data = {};
+        }
+        vnode.data.slot = key;
+      }
+    });
+    return arr.concat(slots[key]);
+  }, []);
+};
+
+// IE9-11 do not support `Object.assign`
+var poly = function poly(target) {
+  if (target == null) {
+    throw new TypeError('Uncaught TypeError: Cannot convert undefined or null to object');
+  }
+
+  for (var i = 0, il = arguments.length <= 1 ? 0 : arguments.length - 1; i < il; i += 1) {
+    var source = arguments.length <= i + 1 ? undefined : arguments[i + 1];
+    if (source == null) {
+      continue;
+    }
+
+    for (var key in source) {
+      if (Object.hasOwnProperty.call(source, key)) {
+        Object.defineProperty(target, key, {
+          enumerable: true,
+          writable: true,
+          value: source[key]
+        });
+      }
+    }
+  }
+
+  // $FlowFixMe
+  return target;
+};
+
+var assign = Object.assign || poly;
+
+var isObject = function isObject(test) {
+  return test && Object.prototype.toString.call(test) === '[object Object]';
+};
+
+var isFunction = function isFunction(test) {
+  return typeof test === 'function';
+};
+
+var isArray = Array.isArray;
+
+var getComponentOptions = (function (Component) {
+  return isFunction(Component) ? Component.options : Component;
+});
+
+var normalize = function normalize(props) {
+  if (!props) {
+    return {};
+  }
+  if (isArray(props)) {
+    var result = {};
+    props.forEach(function (key) {
+      if (typeof key === 'string') {
+        result[key] = {};
+      }
+    });
+    return result;
+  }
+  return assign({}, props);
+};
+
+var mergeMixinProps = function mergeMixinProps(mixins) {
+  var initial = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+
+  if (!mixins || !mixins.length) {
+    return initial;
+  }
+
+  return mixins.reduce(function (result, mixin) {
+    var props = assign({}, mergeMixinProps(mixin.mixins, result), normalize(mixin.props));
+
+    return assign({}, result, props);
+  }, initial);
+};
+
+var getProps = function getProps(Component) {
+  var options = getComponentOptions(Component);
+  var props = normalize(options.props);
+  var mixinProps = mergeMixinProps(options.mixins);
+
+  return assign({}, mixinProps, props);
+};
+
+var CURRIED = '@@VUE_HOC/CURRIED';
+
+// most options can provide a factory function to calculate the value at render time
+// but these options are already menat to be functions, so we don't invoke them
+// during the hoc creation phase
+var justBindOptions = ['listeners', 'nativeOn', 'scopedSlots'];
+
+var justBindFn = function justBindFn(key) {
+  return justBindOptions.indexOf(key) > -1;
+};
+
+// ensures the keys always contain listeners/props/attrs
+var getOptionsKeys = function getOptionsKeys(options) {
+  return Object.keys(options).concat(['listeners', 'props', 'attrs']).filter(function (option, i, arr) {
+    return arr.indexOf(option) === i;
+  });
+};
+
+// for every option, we want to have a factory function that returns
+// the actual result
+var createOptionHandlers = function createOptionHandlers(originalOptions, keys) {
+  var options = {};
+
+  keys.forEach(function (key) {
+    var option = originalOptions[key];
+
+    // if option is not provided, default to returning the initial value
+    if (!option) {
+      options[key] = function (owner) {
+        return owner;
+      };
+      return;
+    }
+
+    // option is a factory function
+    if (isFunction(option)) {
+      options[key] = option;
+      return;
+    }
+
+    // option is an object, we need to handle each property directly
+    if (isObject(option)) {
+      var optionKeys = Object.keys(option);
+      var hasFactories = optionKeys.some(function (key) {
+        return isFunction(option[key]);
+      });
+
+      // no factory functions, just merge the parent/child property
+      if (!hasFactories) {
+        options[key] = function (owner) {
+          return assign({}, owner, option);
+        };
+        return;
+      }
+
+      options[key] = function (owner) {
+        var _this = this;
+
+        var result = assign({}, owner);
+        var justBind = justBindFn(key);
+
+        optionKeys.forEach(function (key) {
+          var value = option && option[key];
+
+          if (isFunction(value)) {
+            // some properties expect functions
+            if (justBind) {
+              value = value.bind(_this);
+              // for everything else, invoke the function to get the value
+            } else {
+              value = value.call(_this, owner);
+            }
+          }
+          result[key] = value;
+        });
+        return result;
+      };
+      return;
+    }
+
+    // for anything else, just return the option value
+    options[key] = function () {
+      return option;
+    };
+  });
+
+  return options;
+};
+
+// prepares the options so during render, we can quickly process them
+var preprocessOptions = function preprocessOptions(originalOptions) {
+  var keys = getOptionsKeys(originalOptions);
+  var options = createOptionHandlers(originalOptions, keys);
+
+  return function (context, isFunctional) {
+    var result = {
+      on: {},
+      props: {},
+      attrs: {}
+    };
+
+    keys.forEach(function (key) {
+      // get this component's value
+      var owner = isFunctional ? context[key] || context.data[key] : context['$' + key];
+
+      // call the option handler
+      var value = options[key].call(context, owner);
+
+      // listeners has to be awkward and be renamed to on
+      if (key === 'listeners') {
+        key = 'on';
+      }
+
+      result[key] = value;
+    });
+
+    return result;
+  };
+};
+
+// any unknown props need to be passed through as attrs
+var getUnusedProps = function getUnusedProps(Component, props) {
+  var result = {};
+  var target = getProps(Component);
+
+  Object.keys(props).forEach(function (prop) {
+    if (target[prop] === undefined) {
+      result[prop] = props[prop];
+    }
+  });
+
+  return result;
+};
+
+var statelessRenderFn = function statelessRenderFn(Component, getData, h, context) {
+  var data = getData(context, true);
+  var scopedSlots = context.data.scopedSlots;
+  var slots = context.children || [];
+  var unusedProps = getUnusedProps(Component, data.props);
+
+  data.scopedSlots = data.scopedSlots || scopedSlots;
+  data.attrs = assign({}, unusedProps, data.attrs);
+
+  return h(Component, data, slots);
+};
+var statefulRenderFn = function statefulRenderFn(Component, getData, h, context) {
+  var data = getData(context, false);
+  var scopedSlots = context.$scopedSlots;
+  var slots = normalizeSlots(context.$slots, context.$vnode.context) || [];
+  var unusedProps = getUnusedProps(Component, data.props);
+
+  data.scopedSlots = data.scopedSlots || scopedSlots;
+  data.attrs = assign({}, unusedProps, data.attrs);
+
+  return h(Component, data, slots);
+};
+
+var createRenderFn = function createRenderFn(Component, options) {
+  var getData = preprocessOptions(options || {});
+
+  return function renderHoc(h, context) {
+    return context ? statelessRenderFn(Component, getData, h, context) : statefulRenderFn(Component, getData, h, this);
+  };
+};
+
+var createRenderFnc = function createRenderFnc(options) {
+  var curried = function curried(Component) {
+    return createRenderFn(Component, options);
+  };
+  curried[CURRIED] = true;
+  return curried;
+};
+
+var defaultStrategy = function defaultStrategy(parent, child) {
+  return child;
+};
+
+var createHOC = function createHOC(Component, options, renderOptions) {
+  var target = getComponentOptions(Component);
+
+  var hoc = {
+    props: getProps(target),
+    mixins: [],
+    name: (target.name || 'Anonymous') + 'HOC',
+    render: createRenderFnc(renderOptions)
+  };
+
+  if (options) {
+    // merge options into the hoc
+    // we piggyback off Vue's optionMergeStrategies so we get the same
+    // merging behavior as with mixins
+    Object.keys(options).forEach(function (key) {
+      var child = options && options[key];
+      var parent = hoc[key];
+      var strategy = Vue.config.optionMergeStrategies[key] || defaultStrategy;
+
+      // props are unique as we have a specific normaliser
+      if (key === 'props') {
+        child = getProps(options);
+      }
+
+      hoc[key] = strategy(parent, child);
+    });
+  }
+
+  hoc.mixins && hoc.mixins.push({
+    created: function created() {
+      this.$createElement = this.$vnode.context.$createElement;
+      this._c = this.$vnode.context._c;
+    }
+  });
+
+  if (hoc.render && hoc.render[CURRIED]) {
+    hoc.render = hoc.render(Component);
+  }
+
+  return hoc;
+};
+
+var createHOCc = function createHOCc(options, renderOptions) {
+  var curried = function curried(Component) {
+    return createHOC(Component, options, renderOptions);
+  };
+  curried[CURRIED] = true;
+  return curried;
+};
+
+var index = {
+  normalizeSlots: normalizeSlots,
+  createRenderFn: createRenderFn,
+  createRenderFnc: createRenderFnc,
+  createHOC: createHOC,
+  createHOCc: createHOCc
+};
+
+export default index;
+export { normalizeSlots, createRenderFn, createRenderFnc, createHOC, createHOCc };
