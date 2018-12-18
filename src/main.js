@@ -1,8 +1,7 @@
 import Vue from 'vue'
 import App from './App.vue'
-
+window.App=App;
 Vue.config.productionTip = false
-debugger
 new Vue({
   render: h => h(App)
 }).$mount('#app')
