@@ -11,13 +11,13 @@ export default {
   data() {
     return {
       root:{child:0},
-      name:'root',
-      com: PresentationComponent
+      // name:'root',
+      // com: PresentationComponent
     };
   },
   render(h){
     return h('Child',{props:{
-      input:this.root.child
+      input:this.root
     },on: {
       click: this.onClick
     }})
@@ -33,10 +33,16 @@ export default {
   },
   components: {
     Child:{
+      name:'childd',
+      // functional:true,
+      // render(h,context){
+      //   debugger;
+      //   return h('span',{on:context.listeners},context.props.input.child)
+      // },
       props:['input'],
-      render(h,context){
+      render(h){
         debugger;
-        return h('span',{on:this.$listeners},this.input)
+        return h('span',{on:this.$listeners},this.input.child)
       }
     },
     // PresentationComponent,
